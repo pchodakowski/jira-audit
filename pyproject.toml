@@ -1,0 +1,23 @@
+[project]
+name = "jira-audit"
+version = "0.1.0"
+description = "Kanban flow audit tool for Jira Cloud"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "httpx>=0.25",
+    "pyyaml>=6.0",
+    "typer>=0.12",
+    "rich>=13.0",
+    "keyring>=24.0",
+]
+
+[project.scripts]
+jira-audit = "jira_audit.cli:app"
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+packages = ["jira_audit"]
