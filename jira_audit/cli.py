@@ -9,6 +9,7 @@ from rich import print
 
 from .config import ClientProfile, save_profile, load_profile
 from .auth import save_token, load_token
+from .db import initialize_db
 
 app = typer.Typer(add_completion=False)
 
@@ -85,6 +86,15 @@ def whoami(profile: str):
         print("[green]Auth OK[/green]")
         print(f"User: {display}")
         print(f"AccountId: {acct_id}")
+
+@app.command()
+def sync(profile: str):
+    """
+    Initialize local database for profile.
+    (Next step pull issues from Jira.)
+    """
+    initialize_db(profile)
+    print(f"[green]Database initialized for profile[/green] {profile}")
 
 if __name__ == "__main__":
     app()
