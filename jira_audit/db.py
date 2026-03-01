@@ -5,6 +5,14 @@ import sqlite3
 from pathlib import Path
 from .config import DATA_DIR, ensure_app_dirs
 
+def ensure_column(conn: sqlite3.Connection, table: str, column: str, coltype: str = "TEXT") -> None:
+    cur = conn.cursor()
+    cur.execute(f"PRAGMA table_info({table})")
+    cols = {row[1] for row in cur.fetchall()}
+    if column not in cols:
+        cur.execute(f"ALTER TABLE {table} ADD COLUMN {column} {coltype}")
+        conn.commit()
+
 def db_path(profile_name: str) -> Path:
     ensure_app_dirs()
     return DATA_DIR / f"{profile_name}.sqlite"
@@ -55,6 +63,10 @@ def initialize_db(profile_name: str) -> None:
             error TEXT
         )
     """)
+
+    ensure_column(conn, "changelog_events", "from_value", "TEXT")
+    ensure_column(conn, "changelog_events", "to_value", "TEXT")
+
     conn.commit()
     conn.close()
     ensure_indexes(profile_name)
@@ -143,3 +155,43 @@ def insert_changelog_event(
         pass
     finally:
         conn.close()
+
+def get_last_successful_sync_started_at(profile_name: str) -> str | None:
+    conn = get_connection(profile_name)
+    cur = conn.cursor()
+    cur.execute("""
+        SELECT started_at
+        FROM sync_runs
+        WHERE error IS NULL
+        ORDER BY id DESC
+        LIMIT 1
+    """)
+    row = cur.fetchone()
+    conn.close()
+    return row["started_at"] if row else None
+
+def insert_sync_run_start(profile_name: str, started_at: str) -> int:
+    conn = get_connection(profile_name)
+    cur = conn.cursor()
+    cur.execute(
+        "INSERT INTO sync_runs(started_at, finished_at, issues_count, events_count, error) VALUES(?,?,?,?,?)",
+        (started_at, None, 0, 0, None),
+    )
+    conn.commit()
+    sync_id = cur.lastrowid
+    conn.close()
+    return int(sync_id)
+
+def finish_sync_run(profile_name: str, sync_id: int, finished_at: str, issues: int, events: int, error: str | None) -> None:
+    conn = get_connection(profile_name)
+    cur = conn.cursor()
+    cur.execute(
+        """
+        UPDATE sync_runs
+        SET finished_at=?, issues_count=?, events_count=?, error=?
+        WHERE id=?
+        """,
+        (finished_at, issues, events, error, sync_id),
+    )
+    conn.commit()
+    conn.close()
