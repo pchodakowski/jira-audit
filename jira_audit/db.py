@@ -2,16 +2,10 @@ from __future__ import annotations
 
 import json
 import sqlite3
+from datetime import datetime
 from pathlib import Path
 from .config import DATA_DIR, ensure_app_dirs
 
-def ensure_column(conn: sqlite3.Connection, table: str, column: str, coltype: str = "TEXT") -> None:
-    cur = conn.cursor()
-    cur.execute(f"PRAGMA table_info({table})")
-    cols = {row[1] for row in cur.fetchall()}
-    if column not in cols:
-        cur.execute(f"ALTER TABLE {table} ADD COLUMN {column} {coltype}")
-        conn.commit()
 
 def db_path(profile_name: str) -> Path:
     ensure_app_dirs()
@@ -22,6 +16,14 @@ def get_connection(profile_name: str) -> sqlite3.Connection:
     conn = sqlite3.connect(str(path))
     conn.row_factory = sqlite3.Row
     return conn
+
+def ensure_column(conn: sqlite3.Connection, table: str, column: str, coltype: str = "TEXT") -> None:
+    cur = conn.cursor()
+    cur.execute(f"PRAGMA table_info({table})")
+    cols = {row[1] for row in cur.fetchall()}
+    if column not in cols:
+        cur.execute(f"ALTER TABLE {table} ADD COLUMN {column} {coltype}")
+        conn.commit()
 
 def initialize_db(profile_name: str) -> None:
 

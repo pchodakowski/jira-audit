@@ -11,7 +11,9 @@ from datetime import datetime, timedelta, timezone
 from .jira_client import JiraClient
 from .config import ClientProfile, save_profile, load_profile
 from .auth import save_token, load_token
-from .db import initialize_db, upsert_issue, insert_changelog_event, db_path
+from .db import (
+    initialize_db, upsert_issue, insert_changelog_event, db_path, get_last_successful_sync_started_at, insert_sync_run_start, finish_sync_run
+)
 
 app = typer.Typer(add_completion=False)
 
@@ -94,6 +96,7 @@ def sync(
     profile: str,
     limit: int =typer.Option(0, help="Optional max issues to fetch (0 = no limit)."),
     days: int = typer.Option(365, help="How may days back to sync by default."),
+    full: bool = typer.Option(False, "--full", help="Ignore last sync and do a full horizon sync."),
 ):
     """
     Pull Jira issues (with changelog) into local SQLite cache.
@@ -104,20 +107,38 @@ def sync(
         raise typer.BadParameter(f"No token found in keychain for profile '{profile}'. Run configure again.")
     
     initialize_db(profile)
+    started_at = datetime.now(timezone.utc).isoformat()
+    sync_id = insert_sync_run_start(profile, started_at)
+    last = None if full else get_last_successful_sync_started_at(profile)
+
+    if last:
+        last_dt = datetime.fromisoformat(last.replace("Z", "+00.00"))
+        since_dt = last_dt - timedelta(days=2)
+        since = since_dt.date().isoformat()
+        mode = f"Incremental since {since} (from last sync {last})"
+    else:
+        since = (datetime.now(timezone.utc)-timedelta(days=days)).date().isoformat()
+        mode = f"Full horizon since {since}"
+        if full:
+            mode += " (--full)"
+
+    print(f"[cyan]Sync mode:[/cyan] {mode}")
+
     print(f"[cyan]Using DB: [/cyan] {db_path(profile)}")
 
     jira = JiraClient(base_url=prof.jira_base_url, email=prof.email, token=token)
 
     since = (datetime.now(timezone.utc) - timedelta(days=days)).date().isoformat()
 
-    jql = (
+    try:
+        jql = (
         f'project = "{prof.project_key}" '
         f'AND issuetype != "Sub-task" '
         f'AND (updated >= "{since}" OR created >= "{since}") '
         f'ORDER BY updated ASC'
     )
 
-    fields = [
+        fields = [
         "created",
         "updated",
         "resolutiondate",
@@ -129,65 +150,73 @@ def sync(
         "components",
     ]
 
-    start_at = 0
-    page_size = 100
-    total_seen = 0
-    total_events = 0
+        start_at = 0
+        page_size = 100
+        total_seen = 0
+        total_events = 0
+        error_msg = None
 
-    while True:
-        data = jira.search_issues(
-            jql=jql,
-            fields=fields,
-            expand="changelog",
-            start_at=start_at,
-            max_results=page_size,
-        )
+        while True:
+            data = jira.search_issues(
+                jql=jql,
+                fields=fields,
+                expand="changelog",
+                start_at=start_at,
+                max_results=page_size,
+            )
 
-        issues = data.get("issues", []) or []
-        if not issues:
-            break
+            issues = data.get("issues", []) or []
+            if not issues:
+                break
 
-        for issue in issues:
-            issue_key = issue.get("key")
-            if not issue_key:
-                continue
+            for issue in issues:
+                issue_key = issue.get("key")
+                if not issue_key:
+                    continue
 
-            upsert_issue(profile, issue)
-            total_seen += 1
+                upsert_issue(profile, issue)
+                total_seen += 1
 
-            changelog = issue.get("changelog") or {}
-            histories = changelog.get("histories", []) or []
-            for h in histories:
-                changed_at = h.get("created")
-                items = h.get("items", []) or []
-                for item in items:
-                    field = item.get("field")
-                    if field not in ("status", "Flagged", "assignee"):
-                        continue
+                changelog = issue.get("changelog") or {}
+                histories = changelog.get("histories", []) or []
+                for h in histories:
+                    changed_at = h.get("created")
+                    items = h.get("items", []) or []
+                    for item in items:
+                        field = item.get("field")
+                        if field not in ("status", "Flagged", "assignee"):
+                            continue
 
-                    from_str = item.get("fromString")
-                    to_str = item.get("toString")
+                        from_str = item.get("fromString")
+                        to_str = item.get("toString")
 
-                    insert_changelog_event(
-                        profile_name=profile,
-                        issue_key=issue_key,
-                        changed_at=changed_at,
-                        field=field,
-                        from_value=from_str,
-                        to_value=to_str,
-                    )
-                    total_events +=1
-            if limit and total_seen >= limit:
-                print(f"[yellow]Limit reached:[/yellow] {limit} issues")
-                print(f"[green]Synced issues:[/green] {total_seen} [green]events:[/green] {total_events}")
-                return
-            
-        start_at += len(issues)
-        total = data.get("total", 0)
-        print(f"Fetched {start_at}/{total} issues...")
+                        insert_changelog_event(
+                            profile_name=profile,
+                            issue_key=issue_key,
+                            changed_at=changed_at,
+                            field=field,
+                            from_value=from_str,
+                            to_value=to_str,
+                        )
+                        total_events +=1
+                if limit and total_seen >= limit:
+                    print(f"[yellow]Limit reached:[/yellow] {limit} issues")
+                    print(f"[green]Synced issues:[/green] {total_seen} [green]events:[/green] {total_events}")
+                    return
+                
+            start_at += len(issues)
+            total = data.get("total", 0)
+            print(f"Fetched {start_at}/{total} issues...")
 
-        if start_at >= total:
-            break
+            if start_at >= total:
+                break
+
+    except Exception as e:
+        error_msg = f"{type(e).__name__}: {e}"
+        raise
+    finally:
+        finished_at = datetime.now(timezone.utc).isoformat()
+        finish_sync_run(profile, sync_id, finished_at, total_seen, total_events, error_msg)
 
     print(f"[green]Done.[/green] Synced issues: {total_seen} events: {total_events}")
 
