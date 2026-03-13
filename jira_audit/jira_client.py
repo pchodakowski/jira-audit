@@ -22,21 +22,26 @@ class JiraClient:
     def search_issues(
             self,
             jql: str,
-            fields: List[str],
-            expand: Optional[str] = None,
+            fields: list[str],
+            expand: str | None = None,
             start_at: int = 0,
             max_results: int = 100,
-    ) -> Dict[str, Any]:
+            next_page_token: str | None = None,
+    ) -> dict:
         """
         Calls Jira Cloud: GET /rest/api/3/search
         Handles basic retry/backoff on 429/503
         """
-        params: Dict[str, Any] = {
-            "jql": jql,
-            "startAt": start_at,
+        params: dict = {
             "maxResults": max_results,
             "fields": ",".join(fields),
+            "jql": jql,
         }
+        if next_page_token:
+            params["nextPageToken"] = next_page_token
+        else:
+            params["startAt"] = start_at
+
         if expand:
             params["expand"] = expand
 
@@ -46,11 +51,8 @@ class JiraClient:
                 r = c.get("/rest/api/3/search/jql", params=params)
                 if r.status_code in (429,503):
                     retry_after = r.headers.get("Retry-After")
-                    if retry_after:
-                        sleep_s = float(retry_after)
-                    else:
-                        sleep_s = backoff
-                        backoff = min(backoff * 2, 30)
+                    sleep_s = float(retry_after) if retry_after else backoff
+                    backoff = min(backoff * 2, 30)
                     time.sleep(sleep_s)
                     continue
                 r.raise_for_status()

@@ -49,7 +49,7 @@ def initialize_db(profile_name: str) -> None:
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             issue_key TEXT,
             changed_at TEXT,
-            field TEXT
+            field TEXT,
             from_value TEXT,
             to_value TEXT
             )
@@ -66,6 +66,22 @@ def initialize_db(profile_name: str) -> None:
         )
     """)
 
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS status_segments(
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            issue_key TEXT NOT NULL,
+            status_name TEXT NOT NULL,
+            start_ts TEXT NOT NULL,
+            end_ts TEXT,
+            calendar_minutes INTEGER NOT NULL,
+            business_minutes INTEGER NOT NULL,
+            flagged_minutes INTEGER NOT NULL    
+        )
+    """)
+
+    cur.execute("CREATE INDEX IF NOT EXISTS ix_segments_issue_key ON status_segments(issue_key)")
+    cur.execute("CREATE INDEX IF NOT EXISTS ix_segments_status_name ON status_segments(status_name)")
+    
     ensure_column(conn, "changelog_events", "from_value", "TEXT")
     ensure_column(conn, "changelog_events", "to_value", "TEXT")
 
@@ -79,6 +95,13 @@ def ensure_indexes(profile_name: str) -> None:
     cur.execute("""
         CREATE UNIQUE INDEX IF NOT EXISTS ux_changelog_dedupe ON changelog_events(issue_key, changed_at, field, COALESCE(from_value, ''), COALESCE(to_value,''))
     """)
+    conn.commit()
+    conn.close()
+
+def clear_status_segments(profile_name: str) -> None:
+    conn = get_connection(profile_name)
+    cur = conn.cursor()
+    cur.execute("DELETE FROM status_segments")
     conn.commit()
     conn.close()
 

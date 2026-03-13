@@ -11,6 +11,7 @@ from datetime import datetime, timedelta, timezone
 from .jira_client import JiraClient
 from .config import ClientProfile, save_profile, load_profile
 from .auth import save_token, load_token
+from .timeline import rebuild_all_segments
 from .db import (
     initialize_db, upsert_issue, insert_changelog_event, db_path, get_last_successful_sync_started_at, insert_sync_run_start, finish_sync_run
 )
@@ -107,28 +108,32 @@ def sync(
         raise typer.BadParameter(f"No token found in keychain for profile '{profile}'. Run configure again.")
     
     initialize_db(profile)
+
     started_at = datetime.now(timezone.utc).isoformat()
     sync_id = insert_sync_run_start(profile, started_at)
+
     last = None if full else get_last_successful_sync_started_at(profile)
 
     if last:
-        last_dt = datetime.fromisoformat(last.replace("Z", "+00.00"))
+        last_dt = datetime.fromisoformat(last.replace("Z", "+00:00"))
         since_dt = last_dt - timedelta(days=2)
         since = since_dt.date().isoformat()
         mode = f"Incremental since {since} (from last sync {last})"
     else:
         since = (datetime.now(timezone.utc)-timedelta(days=days)).date().isoformat()
-        mode = f"Full horizon since {since}"
         if full:
-            mode += " (--full)"
-
+            mode = f"Full horizon since {since} (--full)"
+        else:
+            mode = f"Full horizon since {since}"
+            
     print(f"[cyan]Sync mode:[/cyan] {mode}")
-
     print(f"[cyan]Using DB: [/cyan] {db_path(profile)}")
 
     jira = JiraClient(base_url=prof.jira_base_url, email=prof.email, token=token)
 
-    since = (datetime.now(timezone.utc) - timedelta(days=days)).date().isoformat()
+    total_seen = 0
+    total_events = 0
+    error_msg = None
 
     try:
         jql = (
@@ -152,9 +157,7 @@ def sync(
 
         start_at = 0
         page_size = 100
-        total_seen = 0
-        total_events = 0
-        error_msg = None
+        next_page_token = None
 
         while True:
             data = jira.search_issues(
@@ -163,9 +166,11 @@ def sync(
                 expand="changelog",
                 start_at=start_at,
                 max_results=page_size,
+                next_page_token=next_page_token
             )
 
             issues = data.get("issues", []) or []
+
             if not issues:
                 break
 
@@ -199,16 +204,19 @@ def sync(
                             to_value=to_str,
                         )
                         total_events +=1
+
                 if limit and total_seen >= limit:
                     print(f"[yellow]Limit reached:[/yellow] {limit} issues")
                     print(f"[green]Synced issues:[/green] {total_seen} [green]events:[/green] {total_events}")
                     return
                 
             start_at += len(issues)
-            total = data.get("total", 0)
-            print(f"Fetched {start_at}/{total} issues...")
+            next_page_token = data.get("nextPageToken")
+            is_last = data.get("isLast", False)
 
-            if start_at >= total:
+            print(f"Fetched {total_seen} issues...")
+
+            if is_last or not next_page_token:
                 break
 
     except Exception as e:
@@ -219,6 +227,21 @@ def sync(
         finish_sync_run(profile, sync_id, finished_at, total_seen, total_events, error_msg)
 
     print(f"[green]Done.[/green] Synced issues: {total_seen} events: {total_events}")
+
+@app.command()
+def rebuild(profile: str):
+    """
+    Reconstruct status_segments table from raw changelog events.
+    Runi this after every sync.
+    """
+    print(f"[cyan]Rebuilding segments for profile:[/cyan] {profile}")
+
+    result = rebuild_all_segments(profile)
+
+    print(f"[green]Done.[/green]")
+    print(f"  Issues processed: {result['issues_processed']}")
+    print(f"  Segments created: {result['segments_created']}")
+    print(f"  Issues skipped: {result['issues_skipped']}")
 
 if __name__ == "__main__":
     app()
